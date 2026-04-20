@@ -1,0 +1,163 @@
+version: '3.8'
+
+# Stack de Observabilidade e Resiliência - FASE 1 + FASE 2
+# Componentes: Prometheus, Grafana, Node Exporter, App + Alertmanager + Slack
+# Inicie com: docker compose up -d
+
+services:
+  # ============================================================
+  # PROMETHEUS: Central de coleta de métricas
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      # Configuração principal do Prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Regras de alertas
+      - ./prometheus/alerts.rules.yml:/etc/prometheus/alerts.rules.yml:ro
+      # Volume de armazenamento de métricas (persistência)
+      - prometheus_data:/prometheus
+    command:
+      # Scrape a cada 15 segundos (configurável)
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      # Habilita hot-reload de configs (SIGHUP ou endpoint /-/reload)
+      - '--web.enable-lifecycle'
+      # Armazena métricas por 15 dias
+      - '--storage.tsdb.retention.time=15d'
+      # Limita tamanho de bloco em disco
+      - '--storage.tsdb.retention.size=50GB'
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================
+  # GRAFANA: Dashboard e visualização
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Desabilita auth local para facilitar desenvolvimento
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      # Provisioning automático
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      # Desabilita signup
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      # Datasources provisionadas (Prometheus pré-configurado)
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      # Dashboards provisionados
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Armazenamento persistente
+      - grafana_data:/var/lib/grafana
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================
+  # NODE EXPORTER: Métricas do host (CPU, memória, disco, rede)
+  # ============================================================
+  node_exporter:
+    image: prom/node-exporter:latest
+    container_name: node_exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      # Acesso read-only ao filesystem do host para coletar métricas
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9100"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================
+  # APP: Aplicação de exemplo com endpoint /metrics
+  # Usar imagem que expõe métricas Prometheus ou criar custom
+  # ============================================================
+  app:
+    image: kennethreitz/httpbin
+    # Alternativa: build sua própria imagem com instrumentation
+    container_name: app
+    ports:
+      - "8080:80"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/status/200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================
+  # ALERTMANAGER: Gerenciamento de alertas e notificações
+  # ============================================================
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      # Configuração simplificada do Alertmanager (sem Slack por enquanto)
+      - ./alertmanager-simple.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Armazenamento persistente de alertas
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  alertmanager_data:
+    driver: local
+
+networks:
+  observability:
+    driver: bridge

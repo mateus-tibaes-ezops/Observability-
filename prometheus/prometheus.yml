@@ -1,0 +1,89 @@
+# ============================================================
+# PROMETHEUS.YML - Configuração Principal
+# ============================================================
+# Define intervalos de scrape, jobs, e carregamento de regras
+
+global:
+  # Intervalo padrão de scrape (pode ser sobrescrito por job)
+  scrape_interval: 15s
+  
+  # Timeout para cada scrape
+  scrape_timeout: 10s
+  
+  # Intervalo de avaliação de regras de alerta
+  evaluation_interval: 15s
+  
+  # Label global adicionado a todas as métricas
+  external_labels:
+    cluster: 'observabilidade-prod'
+    environment: 'production'
+
+# ============================================================
+# CARREGAMENTO DE REGRAS DE ALERTAS
+# ============================================================
+rule_files:
+  - '/etc/prometheus/alerts.rules.yml'
+
+# ============================================================
+# CONFIGURAÇÃO DE ALERTAS
+# ============================================================
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+      # Relabel para adicionar label ao alertmanager
+      relabel_configs:
+        - source_labels: [__address__]
+          target_label: alertmanager
+
+# ============================================================
+# JOBS DE SCRAPE
+# ============================================================
+scrape_configs:
+  # ========== PROMETHEUS SELF-MONITORING ==========
+  # Monitora o próprio Prometheus
+  - job_name: 'prometheus'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: '/metrics'
+    relabel_configs:
+      # Adiciona label 'instance' com o hostname
+      - source_labels: [__address__]
+        target_label: instance
+
+  # ========== NODE EXPORTER ==========
+  # Coleta métricas de CPU, memória, disco, rede do host
+  - job_name: 'node_exporter'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ['node_exporter:9100']
+        labels:
+          # Label personalizado para identificar o host
+          host: 'monitoring-host'
+          service_type: 'infrastructure'
+    relabel_configs:
+      # Remove labels desnecessários para reduzir cardinalidade
+      - source_labels: [__scheme__]
+        target_label: __scheme__
+
+  # ========== APLICAÇÃO ==========
+  # Scrape da aplicação com endpoint /metrics
+  - job_name: 'application'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['app:80']
+        labels:
+          # Identificação do serviço
+          service: 'app'
+          environment: 'production'
+          team: 'platform'
+    metrics_path: '/metrics'
+    relabel_configs:
+      # Renomeia 'instance' para hostname do container
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'app:8080'

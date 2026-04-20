@@ -1,0 +1,460 @@
+#!/bin/bash
+
+# ============================================================
+# SIMULATE_FAILURE.SH - Script para Simular Falhas
+# ============================================================
+# Simula diferentes cenários de falha para testar:
+# - Alertas do Prometheus
+# - Notificações Slack
+# - Runbooks de resposta
+# ============================================================
+
+set -e
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+print_header() {
+  echo -e "${BLUE}▶ $1${NC}"
+}
+
+print_success() {
+  echo -e "${GREEN}✓ $1${NC}"
+}
+
+print_error() {
+  echo -e "${RED}✗ $1${NC}"
+}
+
+print_warning() {
+  echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+print_info() {
+  echo -e "${BLUE}ℹ $1${NC}"
+}
+
+# ============================================================
+# FUNÇÃO: Mostrar Ajuda
+# ============================================================
+
+show_help() {
+  cat << 'EOF'
+╔════════════════════════════════════════════════════════════╗
+║         SIMULATE_FAILURE - Teste de Falhas                ║
+║                                                            ║
+║ Simula diferentes cenários para validar:                  ║
+║  • Alertas do Prometheus                                  ║
+║  • Notificações Slack                                     ║
+║  • Métricas de observabilidade                           ║
+╚════════════════════════════════════════════════════════════╝
+
+OPÇÕES:
+
+  crash              Simular crash da aplicação (kill container)
+                     ├─ Alerta: ServiceDown (crítico)
+                     ├─ Duração: 30s até restart automático
+                     └─ Esperado: Mensagem Slack em 30s
+
+  cpu                Simular alta CPU com stress-ng
+                     ├─ Alerta: HighCpuWarning (2min) 
+                     ├─ Alerta: HighCpuCritical (1min @ 95%)
+                     ├─ Duração: 3 minutos
+                     └─ Esperado: 2 alertas no Slack
+
+  memory             Simular pressão de memória
+                     ├─ Alerta: LowMemoryAvailable
+                     ├─ Duração: 2 minutos
+                     └─ Esperado: Alerta crítico no Slack
+
+  latency            Simular latência alta
+                     ├─ Alerta: HighLatencyP99
+                     ├─ Duração: 5 minutos
+                     └─ Esperado: Warning no Slack
+
+  errors             Injetar erros HTTP 500
+                     ├─ Alerta: HighErrorRate
+                     ├─ Duração: 5 minutos
+                     └─ Esperado: Warning no Slack
+
+  combined           Simular múltiplas falhas simultaneamente
+                     ├─ Gera: CPU alta + Latência + Erros
+                     ├─ Duração: 5 minutos
+                     └─ Esperado: Agrupamento de alertas
+
+  list               Listar containers e métricas atuais
+
+  cleanup            Remover containers de teste
+
+EXEMPLOS:
+
+  ./scripts/simulate_failure.sh crash
+  ./scripts/simulate_failure.sh cpu --duration 120
+  ./scripts/simulate_failure.sh combined
+  ./scripts/simulate_failure.sh list
+
+OBSERVAÇÕES:
+
+  • Todos os testes enviarão notificações ao Slack
+  • Verifique http://localhost:9090/graph para métricas
+  • Verifique http://localhost:9093 para alertas
+  • Cancelar script com Ctrl+C (alguns testes continuam rodando)
+
+EOF
+}
+
+# ============================================================
+# FUNÇÃO: Listar Status Atual
+# ============================================================
+
+list_status() {
+  print_header "Status Atual da Stack"
+  
+  echo ""
+  print_info "Containers:"
+  docker compose ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "Docker não disponível"
+  
+  echo ""
+  print_info "Principais URLs:"
+  echo "  • Grafana:      http://localhost:3000"
+  echo "  • Prometheus:   http://localhost:9090"
+  echo "  • Alertmanager: http://localhost:9093"
+  echo "  • App:          http://localhost:8080"
+  
+  echo ""
+  print_info "Métricas Atuais (Prometheus):"
+  curl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=up' | jq '.data.result[] | {job: .metric.job, instance: .metric.instance, status: .value[1]}' 2>/dev/null || echo "  Não disponível"
+  
+  echo ""
+  print_info "Alertas Ativos:"
+  curl -s 'http://localhost:9090/api/v1/alerts' | jq '.data.alerts[] | {alertname: .labels.alertname, severity: .labels.severity, state: .state}' 2>/dev/null || echo "  Nenhum alerta ativo"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO A - Crash da Aplicação
+# ============================================================
+
+simulate_crash() {
+  print_header "Simulando CRASH da Aplicação"
+  
+  echo ""
+  print_warning "Matando container 'app'..."
+  docker compose kill app
+  print_success "Container parado"
+  
+  echo ""
+  print_info "Prometheus detectará: up{job='application'} == 0"
+  print_info "Esperado: Alerta 'ServiceDown' (crítico) no Slack após 30s"
+  
+  echo ""
+  read -p "Pressione ENTER para restaurar o serviço..." 
+  
+  print_warning "Restaurando container..."
+  docker compose up -d app
+  sleep 5
+  print_success "App restaurado"
+  
+  echo ""
+  print_info "Esperado: Alerta RESOLVIDO no Slack"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO B - Alta CPU
+# ============================================================
+
+simulate_cpu() {
+  local duration=${1:-180}  # 3 minutos default
+  
+  print_header "Simulando ALTA CPU"
+  
+  echo ""
+  print_info "Duração: $duration segundos"
+  print_info "Usando: stress-ng"
+  
+  # Verificar se stress-ng está instalado
+  if ! command -v stress-ng &> /dev/null; then
+    print_error "stress-ng não encontrado. Instale com:"
+    echo "  brew install stress-ng  # macOS"
+    echo "  apt-get install stress-ng  # Linux"
+    return 1
+  fi
+  
+  echo ""
+  print_warning "Iniciando stress de CPU..."
+  stress-ng --cpu 4 --timeout "${duration}s" --quiet &
+  local stress_pid=$!
+  
+  echo ""
+  print_info "PID do stress: $stress_pid"
+  print_info "Observar em Prometheus: (100 - (avg(rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100))"
+  
+  echo ""
+  print_info "Timeline esperado:"
+  echo "  • 0s:   Stress inicia, CPU começa a subir"
+  echo "  • ~2min: CPU > 80% por 2min → HighCpuWarning (🟡) em Slack"
+  echo "  • ~1min: CPU > 95% por 1min → HighCpuCritical (🔴) em Slack"
+  echo "  • ~${duration}s: Stress termina, CPU volta ao normal"
+  echo "  • +4h:  Alertas repetem (repeat_interval: 4h)"
+  
+  echo ""
+  print_warning "Aguardando stress terminar (${duration}s)..."
+  wait $stress_pid 2>/dev/null || true
+  
+  print_success "Stress finalizado"
+  echo ""
+  print_info "Verifique alertas resolvidos no Slack"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO C - Pressão de Memória
+# ============================================================
+
+simulate_memory() {
+  print_header "Simulando PRESSÃO DE MEMÓRIA"
+  
+  echo ""
+  print_info "Método: Criar arquivo grande em /tmp"
+  print_info "Alvo: Reduzir MemAvailable abaixo de 10%"
+  
+  # Calcular 80% da RAM disponível
+  local total_mem=$(vm_stat | grep "Pages free" | awk '{print $3}' | tr -d '.')
+  local target_mb=$((total_mem / 1024 / 4 * 3))  # 75% da RAM em MB
+  
+  echo ""
+  print_warning "Alocando ~${target_mb}MB de memória..."
+  
+  # Usar dd para alocar memória
+  dd if=/dev/zero of=/tmp/memtest.bin bs=1M count=$target_mem 2>/dev/null &
+  local dd_pid=$!
+  
+  echo ""
+  print_info "Observar em Prometheus: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100"
+  print_info "Esperado: LowMemoryAvailable (crítico 🔴) no Slack"
+  
+  echo ""
+  read -p "Pressione ENTER para liberar memória (Ctrl+C para forçar)..." 
+  
+  print_warning "Parando stress de memória..."
+  kill $dd_pid 2>/dev/null || true
+  rm -f /tmp/memtest.bin
+  sleep 2
+  
+  print_success "Memória liberada"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO D - Latência Alta
+# ============================================================
+
+simulate_latency() {
+  print_header "Simulando LATÊNCIA ALTA"
+  
+  echo ""
+  print_warning "Adicionando delay de 1s a todas as requisições..."
+  
+  # Usar tc (traffic control) para simular latência
+  if ! command -v tc &> /dev/null; then
+    print_error "tc (traffic control) não disponível. Alternativa:"
+    echo "  • Usar nginx em frente ao app com delays"
+    echo "  • Ou adicionar delay na aplicação via env var"
+    return 1
+  fi
+  
+  # Adicionar 1s de delay ao container app
+  # docker exec app tc qdisc add dev eth0 root netem delay 1000ms
+  
+  echo ""
+  print_info "Observar em Prometheus:"
+  echo "  P50: histogram_quantile(0.50, ...)"
+  echo "  P95: histogram_quantile(0.95, ...)"
+  echo "  P99: histogram_quantile(0.99, ...)"
+  
+  print_info "Esperado: HighLatencyP99 (warning 🟡) no Slack após 5min"
+  
+  echo ""
+  read -p "Pressione ENTER para remover delay..." 
+  
+  print_warning "Removendo latência..."
+  # docker exec app tc qdisc del dev eth0 root netem 2>/dev/null || true
+  
+  print_success "Latência normalizada"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO E - Injetar Erros HTTP
+# ============================================================
+
+simulate_errors() {
+  print_header "Simulando ERROS HTTP 500"
+  
+  echo ""
+  print_info "Gerando requisições com erro via curl em loop..."
+  
+  # Gerar 100 requisições por segundo com erro
+  (
+    for i in {1..300}; do
+      curl -s "http://localhost:8080/status/500" > /dev/null 2>&1 &
+      if [ $((i % 50)) -eq 0 ]; then
+        echo -ne "  Requisições com erro: $i/300\r"
+      fi
+      sleep 0.01
+    done
+    wait
+  ) &
+  
+  local loop_pid=$!
+  
+  echo ""
+  print_info "Observar em Prometheus: (sum(rate(http_requests_total{status=~'5..'}[5m])) / sum(rate(http_requests_total[5m]))) * 100"
+  print_info "Esperado: HighErrorRate (warning 🟡) no Slack após 5min"
+  
+  echo ""
+  print_info "Aguardando 5 minutos para acumular erros..."
+  echo "  • 0min:  Erros começam"
+  echo "  • 5min:  HighErrorRate disparado se > 5%"
+  echo ""
+  
+  read -p "Pressione ENTER para parar..."
+  
+  kill $loop_pid 2>/dev/null || true
+  print_success "Teste de erros finalizado"
+}
+
+# ============================================================
+# FUNÇÃO: OPÇÃO F - Cenário Combinado
+# ============================================================
+
+simulate_combined() {
+  print_header "Simulando MÚLTIPLAS FALHAS (Cenário Real)"
+  
+  echo ""
+  print_warning "Iniciando:"
+  echo "  1. Alta CPU (stress-ng)"
+  echo "  2. Requisições lentas (simulação)"
+  echo "  3. Alguns erros HTTP"
+  
+  # 1. Stress CPU
+  if command -v stress-ng &> /dev/null; then
+    print_info "Iniciando stress de CPU..."
+    stress-ng --cpu 4 --timeout 300s --quiet &
+  fi
+  
+  # 2. Gerar requisições lentas
+  print_info "Gerando requisições para o app..."
+  (
+    for i in {1..100}; do
+      curl -s "http://localhost:8080/delay/2" > /dev/null 2>&1 &
+      sleep 0.1
+    done
+  ) &
+  
+  # 3. Alguns erros
+  print_info "Injetando alguns erros..."
+  (
+    for i in {1..50}; do
+      curl -s "http://localhost:8080/status/500" > /dev/null 2>&1 &
+      sleep 0.2
+    done
+  ) &
+  
+  echo ""
+  print_info "Cenário rodando por 5 minutos..."
+  print_info "Esperado: Agrupamento de múltiplos alertas em 1 mensagem Slack"
+  echo ""
+  print_info "Alertas esperados:"
+  echo "  • HighCpuWarning ou HighCpuCritical"
+  echo "  • HighLatencyP99"
+  echo "  • HighErrorRate"
+  echo ""
+  
+  sleep 300
+  
+  print_info "Finalizando teste combinado..."
+  pkill -P $$ stress-ng 2>/dev/null || true
+  
+  print_success "Cenário combinado finalizado"
+}
+
+# ============================================================
+# FUNÇÃO: Cleanup
+# ============================================================
+
+cleanup() {
+  print_header "Limpando containers e processos de teste"
+  
+  echo ""
+  print_warning "Matando processos de stress..."
+  pkill -f stress-ng 2>/dev/null || true
+  pkill -f "curl.*5" 2>/dev/null || true
+  
+  echo ""
+  print_warning "Removendo arquivos temporários..."
+  rm -f /tmp/memtest.bin /tmp/*.stress
+  
+  echo ""
+  print_warning "Restaurando containers..."
+  docker compose up -d app 2>/dev/null || true
+  
+  print_success "Limpeza finalizada"
+}
+
+# ============================================================
+# MAIN - Processar argumentos
+# ============================================================
+
+main() {
+  if [ $# -eq 0 ]; then
+    show_help
+    exit 0
+  fi
+  
+  case "$1" in
+    crash)
+      simulate_crash
+      ;;
+    cpu)
+      simulate_cpu "${2:-180}"
+      ;;
+    memory)
+      simulate_memory
+      ;;
+    latency)
+      simulate_latency
+      ;;
+    errors)
+      simulate_errors
+      ;;
+    combined)
+      simulate_combined
+      ;;
+    list)
+      list_status
+      ;;
+    cleanup)
+      cleanup
+      ;;
+    -h|--help|help)
+      show_help
+      ;;
+    *)
+      print_error "Opção desconhecida: $1"
+      echo ""
+      show_help
+      exit 1
+      ;;
+  esac
+}
+
+# ============================================================
+# EXECUTAR
+# ============================================================
+
+main "$@"

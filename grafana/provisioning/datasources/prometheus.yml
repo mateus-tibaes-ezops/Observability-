@@ -1,0 +1,24 @@
+# ============================================================
+# GRAFANA PROVISIONING - DATASOURCE PROMETHEUS
+# ============================================================
+# Arquivo de configuração que será lido no startup do Grafana
+# Cria automaticamente a conexão com Prometheus
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # URL interna do container Prometheus
+    url: http://prometheus:9090
+    # Padrão: usar este datasource quando nenhum for especificado
+    isDefault: true
+    # Habilitar para aceitar cookies (pode ser necessário para autenticação)
+    withCredentials: false
+    # Configurações específicas do Prometheus
+    jsonData:
+      # Intervalo de scrape em segundo (deve corresponder a prometheus.yml)
+      timeInterval: 15s
+      # Usar label_names em vez de label_values para simplificar queries
+      useProxy: true

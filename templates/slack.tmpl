@@ -1,0 +1,12 @@
+{{- define "slack.default" -}}
+{{ range .Alerts.Firing }}
+*{{ .Labels.severity | toUpper }}* | {{ .Labels.alertname }}
+{{ if .Annotations.summary }}Valor: {{ .Annotations.summary }}{{ end }}
+{{ if .Labels.instance }}Instância: {{ .Labels.instance }}{{ end }}
+{{ if .Labels.job }}Serviço: {{ .Labels.job }}{{ end }}
+---
+{{ end }}
+{{ if .Alerts.Resolved }}
+✅ RESOLVIDO: {{ .GroupLabels.alertname }}
+{{ end }}
+{{- end }}
