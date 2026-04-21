@@ -64,7 +64,7 @@ OPÇÕES:
                      ├─ Duração: 30s até restart automático
                      └─ Esperado: Mensagem Slack em 30s
 
-  cpu                Simular alta CPU com stress-ng
+  cpu                Simular alta CPU com container de stress
                      ├─ Alerta: HighCpuWarning (2min) 
                      ├─ Alerta: HighCpuCritical (1min @ 95%)
                      ├─ Duração: 3 minutos
@@ -103,7 +103,7 @@ EXEMPLOS:
 
 OBSERVAÇÕES:
 
-  • Todos os testes enviarão notificações ao Slack
+  • Todos os testes podem enviar notificações ao Slack e Discord
   • Verifique http://localhost:9090/graph para métricas
   • Verifique http://localhost:9093 para alertas
   • Cancelar script com Ctrl+C (alguns testes continuam rodando)
@@ -177,23 +177,13 @@ simulate_cpu() {
   
   echo ""
   print_info "Duração: $duration segundos"
-  print_info "Usando: stress-ng"
-  
-  # Verificar se stress-ng está instalado
-  if ! command -v stress-ng &> /dev/null; then
-    print_error "stress-ng não encontrado. Instale com:"
-    echo "  brew install stress-ng  # macOS"
-    echo "  apt-get install stress-ng  # Linux"
-    return 1
-  fi
+  print_info "Usando: container progrium/stress"
   
   echo ""
   print_warning "Iniciando stress de CPU..."
-  stress-ng --cpu 4 --timeout "${duration}s" --quiet &
-  local stress_pid=$!
+  docker run --rm -d --name observabilidade-stress-cpu progrium/stress --cpu 4 --timeout "${duration}s" >/dev/null
   
   echo ""
-  print_info "PID do stress: $stress_pid"
   print_info "Observar em Prometheus: (100 - (avg(rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100))"
   
   echo ""
@@ -206,11 +196,11 @@ simulate_cpu() {
   
   echo ""
   print_warning "Aguardando stress terminar (${duration}s)..."
-  wait $stress_pid 2>/dev/null || true
+  sleep "$duration"
   
   print_success "Stress finalizado"
   echo ""
-  print_info "Verifique alertas resolvidos no Slack"
+  print_info "Verifique alertas resolvidos no Slack e/ou Discord"
 }
 
 # ============================================================
@@ -224,28 +214,21 @@ simulate_memory() {
   print_info "Método: Criar arquivo grande em /tmp"
   print_info "Alvo: Reduzir MemAvailable abaixo de 10%"
   
-  # Calcular 80% da RAM disponível
-  local total_mem=$(vm_stat | grep "Pages free" | awk '{print $3}' | tr -d '.')
-  local target_mb=$((total_mem / 1024 / 4 * 3))  # 75% da RAM em MB
+  local duration=${1:-180}
+  local target_mb=${2:-768}
   
   echo ""
   print_warning "Alocando ~${target_mb}MB de memória..."
   
-  # Usar dd para alocar memória
-  dd if=/dev/zero of=/tmp/memtest.bin bs=1M count=$target_mem 2>/dev/null &
-  local dd_pid=$!
+  docker run --rm -d --name observabilidade-stress-mem progrium/stress --vm 1 --vm-bytes "${target_mb}M" --timeout "${duration}s" >/dev/null
   
   echo ""
   print_info "Observar em Prometheus: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100"
   print_info "Esperado: LowMemoryAvailable (crítico 🔴) no Slack"
   
   echo ""
-  read -p "Pressione ENTER para liberar memória (Ctrl+C para forçar)..." 
-  
-  print_warning "Parando stress de memória..."
-  kill $dd_pid 2>/dev/null || true
-  rm -f /tmp/memtest.bin
-  sleep 2
+  print_warning "Aguardando stress de memória terminar (${duration}s)..."
+  sleep "$duration"
   
   print_success "Memória liberada"
 }
@@ -255,21 +238,12 @@ simulate_memory() {
 # ============================================================
 
 simulate_latency() {
+  local duration=${1:-300}
+
   print_header "Simulando LATÊNCIA ALTA"
   
   echo ""
-  print_warning "Adicionando delay de 1s a todas as requisições..."
-  
-  # Usar tc (traffic control) para simular latência
-  if ! command -v tc &> /dev/null; then
-    print_error "tc (traffic control) não disponível. Alternativa:"
-    echo "  • Usar nginx em frente ao app com delays"
-    echo "  • Ou adicionar delay na aplicação via env var"
-    return 1
-  fi
-  
-  # Adicionar 1s de delay ao container app
-  # docker exec app tc qdisc add dev eth0 root netem delay 1000ms
+  print_warning "Gerando requisicoes com delay de 1.2s..."
   
   echo ""
   print_info "Observar em Prometheus:"
@@ -277,13 +251,16 @@ simulate_latency() {
   echo "  P95: histogram_quantile(0.95, ...)"
   echo "  P99: histogram_quantile(0.99, ...)"
   
-  print_info "Esperado: HighLatencyP99 (warning 🟡) no Slack após 5min"
+  print_info "Esperado: HighLatencyP99 (warning 🟡) no Slack/Discord após 5min"
   
   echo ""
-  read -p "Pressione ENTER para remover delay..." 
-  
-  print_warning "Removendo latência..."
-  # docker exec app tc qdisc del dev eth0 root netem 2>/dev/null || true
+  print_warning "Gerando tráfego lento por ${duration}s..."
+  (
+    end_time=$((SECONDS + duration))
+    while [ $SECONDS -lt $end_time ]; do
+      curl -s "http://localhost:8080/delay/1.2" > /dev/null 2>&1 || true
+    done
+  )
   
   print_success "Latência normalizada"
 }
@@ -314,7 +291,7 @@ simulate_errors() {
   
   echo ""
   print_info "Observar em Prometheus: (sum(rate(http_requests_total{status=~'5..'}[5m])) / sum(rate(http_requests_total[5m]))) * 100"
-  print_info "Esperado: HighErrorRate (warning 🟡) no Slack após 5min"
+  print_info "Esperado: HighErrorRate (warning 🟡) no Slack/Discord após 5min"
   
   echo ""
   print_info "Aguardando 5 minutos para acumular erros..."
@@ -322,8 +299,7 @@ simulate_errors() {
   echo "  • 5min:  HighErrorRate disparado se > 5%"
   echo ""
   
-  read -p "Pressione ENTER para parar..."
-  
+  sleep 300
   kill $loop_pid 2>/dev/null || true
   print_success "Teste de erros finalizado"
 }
@@ -342,10 +318,8 @@ simulate_combined() {
   echo "  3. Alguns erros HTTP"
   
   # 1. Stress CPU
-  if command -v stress-ng &> /dev/null; then
-    print_info "Iniciando stress de CPU..."
-    stress-ng --cpu 4 --timeout 300s --quiet &
-  fi
+  print_info "Iniciando stress de CPU..."
+  docker run --rm -d --name observabilidade-stress-combined progrium/stress --cpu 4 --timeout 300s >/dev/null
   
   # 2. Gerar requisições lentas
   print_info "Gerando requisições para o app..."
@@ -378,7 +352,7 @@ simulate_combined() {
   sleep 300
   
   print_info "Finalizando teste combinado..."
-  pkill -P $$ stress-ng 2>/dev/null || true
+  docker rm -f observabilidade-stress-combined 2>/dev/null || true
   
   print_success "Cenário combinado finalizado"
 }
@@ -392,7 +366,7 @@ cleanup() {
   
   echo ""
   print_warning "Matando processos de stress..."
-  pkill -f stress-ng 2>/dev/null || true
+  docker rm -f observabilidade-stress-cpu observabilidade-stress-mem observabilidade-stress-combined 2>/dev/null || true
   pkill -f "curl.*5" 2>/dev/null || true
   
   echo ""

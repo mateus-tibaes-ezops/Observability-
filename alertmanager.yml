@@ -9,17 +9,11 @@ global:
   resolve_timeout: 5m
 
 # ============================================================
-# CONFIGURAÇÃO DE TEMPLATES
-# ============================================================
-templates:
-  - '/etc/alertmanager/slack.tmpl'
-
-# ============================================================
 # ROTEAMENTO DE ALERTAS
 # ============================================================
 route:
   # Receiver padrão para alertas não capturados por rotas específicas
-  receiver: 'slack-notifications'
+  receiver: 'notifications-relay'
   
   # Agrupação de alertas
   group_by:
@@ -43,7 +37,7 @@ route:
     # Envio imediato, sem agrupamento
     - match:
         severity: critical
-      receiver: 'slack-critical'
+      receiver: 'notifications-relay'
       group_wait: 10s        # Reduzir wait para críticos
       group_interval: 5m
       repeat_interval: 30m   # Repetir a cada 30 min para críticos
@@ -53,7 +47,7 @@ route:
     # Agrupamento normal
     - match:
         severity: warning
-      receiver: 'slack-notifications'
+      receiver: 'notifications-relay'
       group_wait: 30s
       group_interval: 10m
       repeat_interval: 4h
@@ -63,55 +57,10 @@ route:
 # CONFIGURAÇÃO DE RECEIVERS (DESTINOS DE NOTIFICAÇÃO)
 # ============================================================
 receivers:
-  # ========== SLACK - GERAL ==========
-  - name: 'slack-notifications'
-    slack_configs:
-      - api_url: 'ALERTMANAGER_SLACK_WEBHOOK'
-        # Canal para onde enviar os alertas
-        channel: 'ALERTMANAGER_SLACK_CHANNEL'
-        
-        # Título da mensagem
-        title: 'Alerta: {{ .GroupLabels.alertname }}'
-        
-        # Resumo da mensagem
-        title_link: 'http://prometheus:9090/graph'
-        
-        # Corpo da mensagem formatado com template
-        text: '{{ template "slack.default" . }}'
-        
-        # Usar template customizado para formatação
-        # Definido em /etc/alertmanager/slack.tmpl
-        
-        # Adicionar campos customizados
+  - name: 'notifications-relay'
+    webhook_configs:
+      - url: 'http://notifier:5001/alert'
         send_resolved: true
-        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
-        
-        # Ações/buttons (opcional)
-        actions:
-          - type: button
-            text: 'Silenciar'
-            url: 'http://alertmanager:9093/#/silences'
-          - type: button
-            text: 'Prometheus'
-            url: 'http://prometheus:9090'
-          - type: button
-            text: 'Grafana'
-            url: 'http://grafana:3000'
-
-  # ========== SLACK - CRÍTICOS (Canal separado) ==========
-  - name: 'slack-critical'
-    slack_configs:
-      - api_url: 'ALERTMANAGER_SLACK_WEBHOOK'
-        # Canal prioritário para alertas críticos
-        channel: 'ALERTMANAGER_SLACK_CHANNEL'
-        
-        title: '🔴 CRÍTICO: {{ .GroupLabels.alertname }}'
-        title_link: 'http://prometheus:9090/graph'
-        text: '{{ template "slack.default" . }}'
-        send_resolved: true
-        
-        # Highlight crítico
-        color: 'danger'
 
 # ============================================================
 # CONFIGURAÇÃO DE SILENCIAMENTO

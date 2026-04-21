@@ -94,17 +94,17 @@ groups:
       - alert: HighErrorRate
         expr: |
           sum(rate(http_requests_total{job="application",status=~"5.."}[5m])) /
-          sum(rate(http_requests_total{job="application"}[5m])) > 0.05
+          clamp_min(sum(rate(http_requests_total{job="application"}[5m])), 0.001) > 0.05
         for: 5m
         labels:
           severity: warning
           component: http
         annotations:
-          summary: "🟡 Taxa de erro HTTP alta no {{ $labels.service }}"
+          summary: "🟡 Taxa de erro HTTP alta na aplicacao"
           description: |
             Taxa de erros 5xx está acima de 5% nos últimos 5 minutos.
             Taxa atual: {{ $value | humanizePercentage }}
-            Serviço: {{ $labels.service }}
+            Serviço: app
           runbook_url: "https://wiki.company.com/runbooks/high-error-rate"
           dashboard_url: "http://grafana:3000/d/app-http-metrics"
 
@@ -119,11 +119,11 @@ groups:
           severity: warning
           component: latency
         annotations:
-          summary: "🟡 Latência P99 elevada no {{ $labels.service }}"
+          summary: "🟡 Latencia P99 elevada na aplicacao"
           description: |
             Latência P99 está acima de 1000ms por mais de 5 minutos.
             Valor P99 atual: {{ $value | humanizeDuration }}
-            Serviço: {{ $labels.service }}
+            Serviço: app
           runbook_url: "https://wiki.company.com/runbooks/high-latency"
           dashboard_url: "http://grafana:3000/d/app-http-metrics"
 
