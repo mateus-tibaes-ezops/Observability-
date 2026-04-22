@@ -1,270 +1,156 @@
-# Stack de Observabilidade e Resiliência - FASE 1
+# Stack de Observabilidade e Resiliencia
 
-**Status**: ✅ Prometheus + Grafana configurados
+**Status atual em 22/04/2026**: stack sobe com `docker compose up -d --build`, os 6 servicos ficam saudaveis e o fluxo de alerta local esta operacional.
 
-## 📋 Visão Geral
+## Visao geral
 
-Este projeto implementa uma stack completa de observabilidade baseada em **Prometheus** e **Grafana**, com alertas automatizados e dashboards provisionados.
+Esta stack usa:
 
-### Componentes
+- `prometheus`: coleta de metricas e avaliacao das regras
+- `grafana`: dashboards provisionados
+- `node_exporter`: metricas do host
+- `app`: aplicacao Flask instrumentada com `/health`, `/metrics`, `/status/<code>` e `/delay/<seconds>`
+- `alertmanager`: agrupamento, roteamento e inibicao de alertas
+- `notifier`: relay HTTP que recebe payloads do Alertmanager e publica em Slack e/ou Discord via webhook
 
-- **Prometheus**: Coleta centralizada de métricas (15s de intervalo)
-- **Grafana**: Visualização e dashboards (porta 3000)
-- **Node Exporter**: Métricas de infraestrutura (CPU, memória, disco)
-- **Application**: Serviço de exemplo com endpoint `/metrics`
+Fluxo de notificacao:
 
----
+```text
+Prometheus -> Alertmanager -> notifier -> Slack / Discord
+```
 
-## 🚀 Quick Start
+## Quick start
 
-### 1. Pré-requisitos
-
-- Docker & Docker Compose instalados
-- Portas livres: 3000 (Grafana), 9090 (Prometheus), 9100 (Node Exporter), 8080 (App)
-
-### 2. Iniciar a Stack
+### 1. Configurar ambiente
 
 ```bash
-# Clone ou navegue ao diretório do projeto
 cd /Users/mateustibaes/Desktop/Observabilidade
+cp .env.example .env
+```
 
-# Inicie todos os serviços
-docker compose up -d
+Preencha no `.env`:
 
-# Verifique o status
+- `SLACK_WEBHOOK_URL` com o webhook real do Slack, se quiser enviar para Slack
+- `DISCORD_WEBHOOK_URL` com o webhook real do Discord, se quiser enviar para Discord
+
+Se os campos ficarem vazios, a stack continua funcionando e o `notifier` responde com `slack_skipped` e `discord_skipped`.
+
+### 2. Subir a stack
+
+```bash
+docker compose up -d --build
 docker compose ps
 ```
 
-### 3. Acessar Interfaces
+Esperado: `prometheus`, `grafana`, `node_exporter`, `app`, `alertmanager` e `notifier` em estado `Up`.
 
-| Serviço | URL | Credenciais |
+### 3. Acessar interfaces
+
+| Servico | URL | Credenciais |
 |---------|-----|-------------|
-| **Grafana** | http://localhost:3000 | admin / admin |
-| **Prometheus** | http://localhost:9090 | N/A (sem auth) |
-| **Node Exporter** | http://localhost:9100 | N/A |
-| **Application** | http://localhost:8080 | N/A |
+| Grafana | http://localhost:3000 | `admin` / `admin` |
+| Prometheus | http://localhost:9090 | sem auth |
+| Alertmanager | http://localhost:9093 | sem auth |
+| App | http://localhost:8080 | sem auth |
 
-### 4. Parar a Stack
+## Estado real validado
 
-```bash
-docker compose down
+Validacoes feitas nesta maquina em `22/04/2026`:
 
-# Com limpeza de volumes
-docker compose down -v
-```
+- `docker compose up -d --build` executado com sucesso
+- `docker compose ps` mostrando 6 servicos saudaveis
+- `http://localhost:8080/health` retornando `{"status":"healthy"}`
+- `http://localhost:8080/metrics` expondo metricas Prometheus
+- `http://localhost:9090/api/v1/targets` com `application`, `node_exporter` e `prometheus` em `up`
+- teste local no `notifier` retornando `{"errors":[],"results":["slack_skipped","discord_skipped"]}` sem webhooks configurados
 
----
-
-## 📊 SLOs e SLIs
-
-### Availability SLO
-- **Target**: 99.5% uptime/mês (máx. ~3.6 horas de downtime)
-- **SLI**: Métrica `up{job="application"}` == 1
-- **Alerta**: `ServiceDown` → crítico após 30 segundos
-
-### Latency SLO
-- **Target**: P99 < 500ms para 95% das requisições
-- **SLI**: `histogram_quantile(0.99, http_request_duration_seconds_bucket)` < 0.5s
-- **Alerta**: `HighLatencyP99` → warning após 5 minutos
-
-### Error Rate SLI
-- **Target**: < 0.5% de erros 5xx
-- **SLI**: `sum(5xx errors) / sum(total requests)` < 0.005
-- **Alerta**: `HighErrorRate` → warning quando > 5% por 5 minutos
-
----
-
-## ⚠️ Alertas Configurados
+## Alertas configurados
 
 ### Infraestrutura
 
-| Alerta | Condição | Severidade | Ação |
-|--------|----------|-----------|------|
-| **HighCpuWarning** | CPU > 80% por 2min | ⚠️ Warning | Monitorar |
-| **HighCpuCritical** | CPU > 95% por 1min | 🔴 Critical | Intervenção imediata |
-| **LowMemoryAvailable** | Memória < 10% por 2min | 🔴 Critical | Intervenção imediata |
+| Alerta | Condicao | Severidade |
+|--------|----------|------------|
+| `HighCpuWarning` | CPU > 80% por 2 min | warning |
+| `HighCpuCritical` | CPU > 95% por 1 min | critical |
+| `LowMemoryAvailable` | uso de memoria > 90% por 2 min | critical |
 
-### Aplicação
+### Aplicacao
 
-| Alerta | Condição | Severidade | Ação |
-|--------|----------|-----------|------|
-| **ServiceDown** | up == 0 por 30s | 🔴 Critical | Restart/Rollback |
-| **HighErrorRate** | Erros 5xx > 5% por 5min | ⚠️ Warning | Investigar logs |
-| **HighLatencyP99** | P99 > 1s por 5min | ⚠️ Warning | Investigar gargalo |
+| Alerta | Condicao | Severidade |
+|--------|----------|------------|
+| `ServiceDown` | `up{job="application"} == 0` por 30 s | critical |
+| `HighErrorRate` | erros 5xx > 5% por 5 min | warning |
+| `HighLatencyP99` | P99 > 1s por 5 min | warning |
 
 ### Monitoramento
 
-| Alerta | Condição | Severidade | Ação |
-|--------|----------|-----------|------|
-| **PrometheusDown** | Prometheus down por 1min | 🔴 Critical | Restart monitoramento |
+| Alerta | Condicao | Severidade |
+|--------|----------|------------|
+| `PrometheusDown` | `up{job="prometheus"} == 0` por 1 min | critical |
 
----
+## Testes uteis
 
-## 📁 Estrutura de Arquivos
+### Ver targets
 
+```bash
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
 ```
+
+### Verificar relay de notificacao
+
+```bash
+docker compose exec -T notifier python - <<'PY'
+import json, urllib.request
+payload = {
+    "status": "firing",
+    "alerts": [{
+        "status": "firing",
+        "labels": {"alertname": "TestNotification", "severity": "warning", "instance": "manual-test"},
+        "annotations": {"summary": "Teste manual do relay"}
+    }]
+}
+req = urllib.request.Request(
+    "http://localhost:5001/alert",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as response:
+    print(response.read().decode())
+PY
+```
+
+### Simular falhas
+
+```bash
+./scripts/simulate_failure.sh list
+./scripts/simulate_failure.sh crash
+./scripts/simulate_failure.sh cpu
+./scripts/simulate_failure.sh memory
+./scripts/simulate_failure.sh combined
+```
+
+## Estrutura principal
+
+```text
 observabilidade/
-├── docker-compose.yml              # Definição de serviços
+├── docker-compose.yml
+├── .env.example
+├── alertmanager.yml
 ├── prometheus/
-│   ├── prometheus.yml              # Config: jobs de scrape
-│   └── alerts.rules.yml            # Regras de alertas
-├── grafana/
-│   └── provisioning/
-│       ├── datasources/
-│       │   └── prometheus.yml      # Datasource Prometheus
-│       └── dashboards/
-│           └── main.json           # Dashboard principal
-├── templates/                      # (FASE 2) Templates Slack
-├── scripts/                        # (FASE 2/3) Scripts de teste
-├── RUNBOOK.md                      # (FASE 2) Procedimentos
-├── POST_MORTEM_TEMPLATE.md         # (FASE 3) Template de post-mortem
-└── README.md                       # Este arquivo
+│   ├── prometheus.yml
+│   └── alerts.rules.yml
+├── grafana/provisioning/
+├── app/
+├── notifier/
+├── scripts/
+├── RUNBOOK.md
+├── GUIA_INICIO.md
+├── STACK_OPERATIONAL.md
+└── FASE2_SLACK.md
 ```
 
----
+## Observacoes
 
-## 🔧 Verificar Dados no Prometheus
-
-1. Acesse **http://localhost:9090**
-2. Explore métricas:
-   - `node_cpu_seconds_total` (CPU)
-   - `node_memory_MemAvailable_bytes` (Memória)
-   - `http_requests_total` (Requisições HTTP)
-   - `http_request_duration_seconds_bucket` (Latência)
-
-### Exemplo: Cálculo de CPU
-
-```promql
-# CPU atual em %
-(100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100))
-```
-
----
-
-## 📈 Dashboards Grafana
-
-### Dashboard Principal
-
-Acesse: **http://localhost:3000/d/observabilidade-main**
-
-**Painéis Inclusos:**
-
-1. **CPU Usage (%)** - Gauge com thresholds (verde <70%, amarelo 70-85%, vermelho >85%)
-2. **Memory Usage (%)** - Gauge com thresholds (verde <75%, amarelo 75-90%, vermelho >90%)
-3. **CPU Usage Over Time** - Série temporal dos últimos 6 horas
-4. **Memory Usage Over Time** - Série temporal dos últimos 6 horas
-5. **HTTP Request Rate** - Taxa de requisições por segundo
-6. **HTTP Error Rate (5xx)** - Taxa de erros com thresholds
-7. **HTTP Latency (P50/P95/P99)** - Percentis de latência
-8. **Service Health Status** - Tabela com status dos serviços
-
----
-
-## 🔍 Troubleshooting
-
-### Prometheus não conecta ao Node Exporter
-
-```bash
-# Verificar se container está rodando
-docker compose ps node_exporter
-
-# Verificar logs
-docker compose logs node_exporter
-
-# Testar conectividade
-docker exec prometheus wget -O- http://node_exporter:9100
-```
-
-### Grafana não carrega datasource
-
-```bash
-# Verificar arquivo provisioning
-ls -la grafana/provisioning/datasources/
-
-# Reiniciar Grafana
-docker compose restart grafana
-
-# Verificar logs
-docker compose logs grafana | grep datasource
-```
-
-### Métricas vazias no Prometheus
-
-```bash
-# Verificar se targets estão up
-# Acesse: http://localhost:9090/targets
-
-# Se aparecer erro, verificar:
-# 1. Docker network configurada
-# 2. Nome do host correto em prometheus.yml
-# 3. Porta exposta corretamente
-```
-
----
-
-## ⚙️ Customização
-
-### Alterar intervalo de scrape
-
-Edite `prometheus/prometheus.yml` e modifique:
-
-```yaml
-global:
-  scrape_interval: 30s  # Aumentar para 30s
-```
-
-Depois: `docker compose up -d prometheus`
-
-### Adicionar novo endpoint para monitoramento
-
-1. Edite `prometheus/prometheus.yml`
-2. Adicione novo job em `scrape_configs`
-3. Reinicie: `docker compose up -d prometheus`
-
-### Alterar threshold de alerta
-
-Edite `prometheus/alerts.rules.yml`:
-
-```yaml
-- alert: HighCpuWarning
-  expr: |
-    (100 - ...) > 90  # Mudou de 80 para 90
-```
-
----
-
-## 📝 Logs e Debug
-
-```bash
-# Todos os logs
-docker compose logs -f
-
-# Logs de um serviço específico
-docker compose logs -f prometheus
-docker compose logs -f grafana
-docker compose logs -f node_exporter
-
-# Últimas 50 linhas
-docker compose logs --tail=50 prometheus
-```
-
----
-
-## 🔄 Próximas Fases
-
-- **FASE 2**: Alertas via Slack + Alertmanager
-- **FASE 3**: Simulação de falhas + Runbooks
-
----
-
-## 📚 Referências
-
-- [Prometheus Docs](https://prometheus.io/docs/)
-- [Grafana Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
-- [Node Exporter Metrics](https://github.com/prometheus/node_exporter)
-- [Alerting Rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)
-
----
-
-**Última atualização**: 20 de abril de 2026  
-**Versão**: FASE 1 ✅
+- A integracao nao e mais "Slack direto no Alertmanager". Hoje o envio externo acontece exclusivamente via `notifier`.
+- O `templates/slack.tmpl` ainda existe no repositorio, mas nao participa do fluxo atual.
+- Sem webhooks reais, a validacao termina no relay local; com webhooks reais, as mensagens seguem para Slack e Discord sem alterar o `alertmanager.yml`.
